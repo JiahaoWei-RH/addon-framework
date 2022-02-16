@@ -51,6 +51,13 @@ deploy-example: ensure-kustomize
 	$(KUSTOMIZE) build examples/deploy/addon | $(KUBECTL) apply -f -
 	mv examples/deploy/addon/kustomization.yaml.tmp examples/deploy/addon/kustomization.yaml
 
+deploy-addonplacementscore: ensure-kustomize
+	cp examples/deploy/addonplacementscore/kustomization.yaml examples/deploy/addonplacementscore/kustomization.yaml.tmp
+	cd examples/deploy/addonplacementscore && $(KUSTOMIZE) edit set image example-addon-image=$(EXAMPLE_IMAGE_NAME) && $(KUSTOMIZE) edit add configmap image-config --from-literal=EXAMPLE_IMAGE_NAME=$(EXAMPLE_IMAGE_NAME)
+	$(KUSTOMIZE) build examples/deploy/addonplacementscore | $(KUBECTL) apply -f -
+	mv examples/deploy/addonplacementscore/kustomization.yaml.tmp examples/deploy/addonplacementscore/kustomization.yaml
+
+
 undeploy-example: ensure-kustomize
 	$(KUSTOMIZE) build examples/deploy/addon | $(KUBECTL) delete --ignore-not-found -f -
 

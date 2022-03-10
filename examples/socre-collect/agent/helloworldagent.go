@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog/v2"
+	"k8s.io/client-go/informers"
+	corev1informers "k8s.io/client-go/informers/core/v1"
 	clusterclient "open-cluster-management.io/api/client/cluster/clientset/versioned"
 	"open-cluster-management.io/api/client/cluster/listers/cluster/v1alpha1"
 	"time"
@@ -89,7 +90,7 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 	if err != nil {
 		return err
 	}
-	// hubKubeInformerFactory := informers.NewSharedInformerFactoryWithOptions(hubKubeClient, 10*time.Minute, informers.WithNamespace(o.SpokeClusterName))
+	spokeKubeInformerFactory := informers.NewSharedInformerFactory(spokeKubeClient, 10*time.Minute)
 	// ++4
 	clusterInformers := clusterinformers.NewSharedInformerFactoryWithOptions(hubClusterClient, 10*time.Minute, clusterinformers.WithNamespace(o.SpokeClusterName))
 
@@ -103,6 +104,8 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 		o.AddonNamespace,
 		controllerContext.EventRecorder,
 		AddOnPlacementScoresName,
+		spokeKubeInformerFactory.Core().V1().Nodes(),
+		spokeKubeInformerFactory.Core().V1().Pods(),
 	)
 	// create a lease updater
 	leaseUpdater := lease.NewLeaseUpdater(
@@ -113,6 +116,7 @@ func (o *AgentOptions) RunAgent(ctx context.Context, controllerContext *controll
 
 	// go hubKubeInformerFactory.Start(ctx.Done())
 	go clusterInformers.Start(ctx.Done())
+	go spokeKubeInformerFactory.Start(ctx.Done())
 	go agent.Run(ctx, 1)
 	go leaseUpdater.Start(ctx)
 
@@ -129,6 +133,8 @@ type agentController struct {
 	addonName                 string
 	addonNamespace            string
 	recorder                  events.Recorder
+	nodeInformer              corev1informers.NodeInformer
+	podInformer               corev1informers.PodInformer
 }
 
 func newAgentController(
@@ -140,6 +146,8 @@ func newAgentController(
 	addonNamespace string,
 	recorder events.Recorder,
 	scoreName string,
+	nodeInformer corev1informers.NodeInformer,
+	podInformer corev1informers.PodInformer,
 ) factory.Controller {
 	c := &agentController{
 		spokeKubeClient:           spokeKubeClient,
@@ -149,6 +157,8 @@ func newAgentController(
 		addonNamespace:            addonNamespace,
 		AddOnPlacementScoreLister: addOnPlacementScoreInformer.Lister(),
 		recorder:                  recorder,
+		podInformer:               podInformer,
+		nodeInformer:              nodeInformer,
 	}
 	//return factory.New().WithFilteredEventsInformersQueueKeyFunc(
 	//	func(obj runtime.Object) string {
@@ -167,63 +177,51 @@ func newAgentController(
 			key, _ := cache.MetaNamespaceKeyFunc(obj)
 			return key
 		}, addOnPlacementScoreInformer.Informer()).
+		WithBareInformers(podInformer.Informer(), nodeInformer.Informer()).
 		WithSync(c.sync).ResyncEvery(time.Second*60).ToController("score-agent-controller", recorder)
 }
 
 func (c *agentController) sync(ctx context.Context, syncCtx factory.SyncContext) error {
 	fmt.Printf("start syncing\n")
-	klog.Infof("start syncing")
-	// 在agent上跑手机cpu，内存，信息的score
-	// 查询hub端有没有addonplacementscore，如果没有这个score，那么创建这个score
-	// 如果有这个score，修改这个score
+
+	score := NewScore(c.nodeInformer, c.podInformer)
+	cpuValue, memValue, err := score.calculateValue()
+	items := []v1alpha2.AddOnPlacementScoreItem{
+		{
+			Name:  "cpuAvailable",
+			Value: int32(cpuValue),
+		},
+		{
+			Name:  "memAvailable",
+			Value: int32(memValue),
+		},
+	}
+	fmt.Printf("calculateValue cpuvalue: %+v, memvalue %+v\n", items[0].Value, items[1].Value)
+
 	addonPlacementScore, err := c.AddOnPlacementScoreLister.AddOnPlacementScores(c.clusterName).Get(AddOnPlacementScoresName)
 	switch {
 	case errors.IsNotFound(err):
-		// 不存在创建一个分数都是0的默认
 		addonPlacementScore = &v1alpha2.AddOnPlacementScore{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: c.clusterName,
 				Name:      AddOnPlacementScoresName,
 			},
 			Status: v1alpha2.AddOnPlacementScoreStatus{
-				Scores: []v1alpha2.AddOnPlacementScoreItem{
-					{
-						Name:  "cpu",
-						Value: 0,
-					},
-					{
-						Name:  "mem",
-						Value: 0,
-					},
-				},
+				Scores: items,
 			},
 		}
 		_, err = c.hubKubeClient.ClusterV1alpha1().AddOnPlacementScores(c.clusterName).Create(ctx, addonPlacementScore, v1.CreateOptions{})
 		if err != nil {
 			return err
 		}
-		klog.Infof("create a new AddOnPlacementScore: %+v", addonPlacementScore.Status)
 		fmt.Printf("create a new AddOnPlacementScore: %+v\n", addonPlacementScore.Status)
 		return nil
 	case err != nil:
 		return err
 	}
 
-	// todo addonplacementscore存在， 手机具体分数，测试暂时指定分数都是99
-	addonPlacementScore.Status.Scores = []v1alpha2.AddOnPlacementScoreItem{
-		{
-			Name:  "cpu",
-			Value: 99,
-		},
-		{
-			Name:  "mem",
-			Value: 99,
-		},
-	}
-
-	// 更新到hub
+	addonPlacementScore.Status.Scores = items
 	_, err = c.hubKubeClient.ClusterV1alpha1().AddOnPlacementScores(c.clusterName).UpdateStatus(ctx, addonPlacementScore, v1.UpdateOptions{})
-	klog.Infof("update AddOnPlacementScore: %+v", addonPlacementScore.Status)
 	fmt.Printf("update AddOnPlacementScore: %+v\n", addonPlacementScore.Status)
 	return err
 }

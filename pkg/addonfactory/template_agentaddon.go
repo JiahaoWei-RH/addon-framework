@@ -6,6 +6,7 @@ import (
 	"github.com/openshift/library-go/pkg/assets"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/klog/v2"
 	"open-cluster-management.io/addon-framework/pkg/agent"
 	addonapiv1alpha1 "open-cluster-management.io/api/addon/v1alpha1"
 	clusterv1 "open-cluster-management.io/api/cluster/v1"
@@ -19,22 +20,26 @@ type templateBuiltinValues struct {
 	HubKubeConfigSecret   string
 }
 
-type TemplateAgentAddon struct {
-	decoder           runtime.Decoder
-	templateData      map[string][]byte
-	getValuesFuncs    []GetValuesFunc
-	agentAddonOptions agent.AgentAddonOptions
+type templateFile struct {
+	name    string
+	content []byte
 }
 
-func newTemplateAgentAddon(
-	scheme *runtime.Scheme,
-	getValuesFuncs []GetValuesFunc,
-	agentAddonOptions agent.AgentAddonOptions) *TemplateAgentAddon {
-	return &TemplateAgentAddon{
-		decoder: serializer.NewCodecFactory(scheme).UniversalDeserializer(),
+type TemplateAgentAddon struct {
+	decoder            runtime.Decoder
+	templateFiles      []templateFile
+	getValuesFuncs     []GetValuesFunc
+	agentAddonOptions  agent.AgentAddonOptions
+	trimCRDDescription bool
+}
 
-		getValuesFuncs:    getValuesFuncs,
-		agentAddonOptions: agentAddonOptions}
+func newTemplateAgentAddon(factory *AgentAddonFactory) *TemplateAgentAddon {
+	return &TemplateAgentAddon{
+		decoder:            serializer.NewCodecFactory(factory.scheme).UniversalDeserializer(),
+		getValuesFuncs:     factory.getValuesFuncs,
+		agentAddonOptions:  factory.agentAddonOptions,
+		trimCRDDescription: factory.trimCRDDescription,
+	}
 }
 
 func (a *TemplateAgentAddon) Manifests(
@@ -46,15 +51,27 @@ func (a *TemplateAgentAddon) Manifests(
 	if err != nil {
 		return objects, err
 	}
-	for file, data := range a.templateData {
-		raw := assets.MustCreateAssetFromTemplate(file, data, configValues).Data
+
+	for _, file := range a.templateFiles {
+		if len(file.content) == 0 {
+			continue
+		}
+		klog.V(4).Infof("rendered template: %v", file.content)
+		raw := assets.MustCreateAssetFromTemplate(file.name, file.content, configValues).Data
 		object, _, err := a.decoder.Decode(raw, nil, nil)
 		if err != nil {
+			if runtime.IsMissingKind(err) {
+				klog.V(4).Infof("Skipping template %v, reason: %v", file.name, err)
+				continue
+			}
 			return nil, err
 		}
 		objects = append(objects, object)
 	}
 
+	if a.trimCRDDescription {
+		objects = trimCRDDescription(objects)
+	}
 	return objects, nil
 }
 
@@ -114,8 +131,5 @@ func (a *TemplateAgentAddon) validateTemplateData(file string, data []byte) erro
 }
 
 func (a *TemplateAgentAddon) addTemplateData(file string, data []byte) {
-	if a.templateData == nil {
-		a.templateData = map[string][]byte{}
-	}
-	a.templateData[file] = data
+	a.templateFiles = append(a.templateFiles, templateFile{name: file, content: data})
 }

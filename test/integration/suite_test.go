@@ -33,6 +33,8 @@ var hubClusterClient clusterv1client.Interface
 var hubAddonClient addonv1alpha1client.Interface
 var hubKubeClient kubernetes.Interface
 var testAddonImpl *testAddon
+var cancel context.CancelFunc
+var mgrContext context.Context
 
 func TestIntegration(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
@@ -70,21 +72,24 @@ var _ = ginkgo.BeforeSuite(func(done ginkgo.Done) {
 		manifests:     map[string][]runtime.Object{},
 		registrations: map[string][]addonapiv1alpha1.RegistrationConfig{},
 	}
+
+	mgrContext, cancel = context.WithCancel(context.TODO())
 	// start hub controller
 	go func() {
 		mgr, err := addonmanager.New(cfg)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = mgr.AddAgent(testAddonImpl)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		mgr.Start(context.Background())
+		mgr.Start(mgrContext)
 	}()
 
 	close(done)
-}, 60)
+}, 300)
 
 var _ = ginkgo.AfterSuite(func() {
 	ginkgo.By("tearing down the test environment")
 
+	cancel()
 	err := testEnv.Stop()
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 })
@@ -95,6 +100,7 @@ type testAddon struct {
 	registrations map[string][]addonapiv1alpha1.RegistrationConfig
 	approveCSR    bool
 	cert          []byte
+	prober        *agent.HealthProber
 }
 
 func (t *testAddon) Manifests(cluster *clusterv1.ManagedCluster, addon *addonapiv1alpha1.ManagedClusterAddOn) ([]runtime.Object, error) {
@@ -103,7 +109,8 @@ func (t *testAddon) Manifests(cluster *clusterv1.ManagedCluster, addon *addonapi
 
 func (t *testAddon) GetAgentAddonOptions() agent.AgentAddonOptions {
 	option := agent.AgentAddonOptions{
-		AddonName: t.name,
+		AddonName:    t.name,
+		HealthProber: t.prober,
 	}
 
 	if len(t.registrations) > 0 {

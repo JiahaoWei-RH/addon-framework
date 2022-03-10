@@ -57,6 +57,9 @@ deploy-addonplacementscore: ensure-kustomize
 	$(KUSTOMIZE) build examples/deploy/addonplacementscore | $(KUBECTL) apply -f -
 	mv examples/deploy/addonplacementscore/kustomization.yaml.tmp examples/deploy/addonplacementscore/kustomization.yaml
 
+undeploy-addon:
+	$(KUBECTL) delete -f examples/deploy/addon/resources/helloworld_helm_clustermanagementaddon.yaml
+	$(KUBECTL) delete -f examples/deploy/addon/resources/helloworld_clustermanagementaddon.yaml
 
 undeploy-example: ensure-kustomize
 	$(KUSTOMIZE) build examples/deploy/addon | $(KUBECTL) delete --ignore-not-found -f -

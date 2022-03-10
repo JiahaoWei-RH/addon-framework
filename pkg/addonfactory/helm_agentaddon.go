@@ -2,6 +2,7 @@ package addonfactory
 
 import (
 	"fmt"
+	"sort"
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chartutil"
@@ -23,22 +24,21 @@ type helmBuiltinValues struct {
 }
 
 type HelmAgentAddon struct {
-	decoder           runtime.Decoder
-	chart             *chart.Chart
-	getValuesFuncs    []GetValuesFunc
-	agentAddonOptions agent.AgentAddonOptions
+	decoder            runtime.Decoder
+	chart              *chart.Chart
+	getValuesFuncs     []GetValuesFunc
+	agentAddonOptions  agent.AgentAddonOptions
+	trimCRDDescription bool
 }
 
-func newHelmAgentAddon(
-	scheme *runtime.Scheme,
-	chart *chart.Chart,
-	getValuesFuncs []GetValuesFunc,
-	agentAddonOptions agent.AgentAddonOptions) *HelmAgentAddon {
+func newHelmAgentAddon(factory *AgentAddonFactory, chart *chart.Chart) *HelmAgentAddon {
 	return &HelmAgentAddon{
-		decoder:           serializer.NewCodecFactory(scheme).UniversalDeserializer(),
-		chart:             chart,
-		getValuesFuncs:    getValuesFuncs,
-		agentAddonOptions: agentAddonOptions}
+		decoder:            serializer.NewCodecFactory(factory.scheme).UniversalDeserializer(),
+		chart:              chart,
+		getValuesFuncs:     factory.getValuesFuncs,
+		agentAddonOptions:  factory.agentAddonOptions,
+		trimCRDDescription: factory.trimCRDDescription,
+	}
 }
 
 func (a *HelmAgentAddon) Manifests(
@@ -70,18 +70,35 @@ func (a *HelmAgentAddon) Manifests(
 	if err != nil {
 		return objects, err
 	}
-	for _, data := range templates {
+
+	// sort the filenames of the templates so the manifests are ordered consistently
+	keys := make([]string, 0, len(templates))
+	for k := range templates {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		data := templates[k]
+
 		if len(data) == 0 {
 			continue
 		}
-		klog.V(4).Infof("%v/n", data)
+		klog.V(4).Infof("rendered template: %v", data)
 		object, _, err := a.decoder.Decode([]byte(data), nil, nil)
 		if err != nil {
+			if runtime.IsMissingKind(err) {
+				klog.V(4).Infof("Skipping template %v, reason: %v", k, err)
+				continue
+			}
 			return nil, err
 		}
 		objects = append(objects, object)
 	}
 
+	if a.trimCRDDescription {
+		objects = trimCRDDescription(objects)
+	}
 	return objects, nil
 }
 

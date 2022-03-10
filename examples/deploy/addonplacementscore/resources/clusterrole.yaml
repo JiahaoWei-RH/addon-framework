@@ -11,7 +11,7 @@ metadata:
     name: addonplacementscorecollect-addon
   rules:
     - apiGroups: [""]
-      resources: ["configmaps", "events"]
+      resources: ["nodes","configmaps", "pods", "events", ]
       verbs: ["get", "list", "watch", "create", "update", "delete", "deletecollection", "patch"]
     - apiGroups: ["rbac.authorization.k8s.io"]
       resources: ["roles", "rolebindings"]
